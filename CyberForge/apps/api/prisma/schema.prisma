@@ -1,0 +1,290 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// USERS & AUTHENTICATION
+// ============================================================================
+
+enum UserRole {
+  ADMIN
+  SECURITY_ANALYST
+  OPERATOR
+  VIEWER
+}
+
+model User {
+  id                      String      @id @default(cuid())
+  email                   String      @unique @db.VarChar(255)
+  passwordHash            String      @db.Text
+  firstName               String?     @db.VarChar(255)
+  lastName                String?     @db.VarChar(255)
+  role                    UserRole    @default(VIEWER)
+  active                  Boolean     @default(true)
+  mfaEnabled              Boolean     @default(false)
+  mfaSecret               String?     @db.Text // Encrypted TOTP secret
+  lastLoginAt             DateTime?
+  lastLoginFailureAt      DateTime?
+  loginFailureCount       Int         @default(0)
+  passwordChangedAt       DateTime    @default(now())
+  createdAt               DateTime    @default(now())
+  updatedAt               DateTime    @updatedAt
+
+  // Relations
+  refreshTokens           RefreshToken[]
+  auditLogs               AuditLog[]
+  alertRules              AlertRule[]
+  sites                   Site[]
+  assets                  Asset[]
+
+  @@index([email])
+  @@index([role])
+}
+
+model RefreshToken {
+  id                      String      @id @default(cuid())
+  jti                     String      @unique @db.VarChar(255)  // JWT ID for revocation
+  token                   String      @db.Text                  // Hashed refresh token
+  userId                  String
+  expiresAt               DateTime
+  revokedAt               DateTime?
+  createdAt               DateTime    @default(now())
+
+  user                    User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// ============================================================================
+// MONITORING ENTITIES
+// ============================================================================
+
+model Site {
+  id                      String      @id @default(cuid())
+  name                    String      @db.VarChar(255)
+  location                String      @db.Text
+  description             String?     @db.Text
+  latitude                Float?
+  longitude               Float?
+  createdBy               String
+  createdAt               DateTime    @default(now())
+  updatedAt               DateTime    @updatedAt
+
+  // Relations
+  assets                  Asset[]
+  alertRules              AlertRule[]
+  creator                 User        @relation(fields: [createdBy], references: [id])
+
+  @@index([createdBy])
+}
+
+model Asset {
+  id                      String      @id @default(cuid())
+  siteId                  String
+  name                    String      @db.VarChar(255)
+  assetType               String      @db.VarChar(100)  // e.g., "pump", "compressor", "reactor"
+  serialNumber            String?     @unique @db.VarChar(255)
+  description             String?     @db.Text
+  status                  String      @default("operational") @db.VarChar(50) // operational, maintenance, offline
+  lastMaintenanceAt       DateTime?
+  createdBy               String
+  createdAt               DateTime    @default(now())
+  updatedAt               DateTime    @updatedAt
+
+  // Relations
+  site                    Site        @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  sensors                 Sensor[]
+  alertRules              AlertRule[]
+  creator                 User        @relation(fields: [createdBy], references: [id])
+
+  @@index([siteId])
+  @@index([createdBy])
+  @@index([status])
+}
+
+model Sensor {
+  id                      String      @id @default(cuid())
+  assetId                 String
+  name                    String      @db.VarChar(255)
+  sensorType              String      @db.VarChar(100)  // e.g., "temperature", "pressure", "vibration"
+  unit                    String      @db.VarChar(50)   // e.g., "°C", "PSI", "mm/s"
+  active                  Boolean     @default(true)
+  lastReadingAt           DateTime?
+  createdAt               DateTime    @default(now())
+  updatedAt               DateTime    @updatedAt
+
+  // Relations
+  asset                   Asset       @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  readings                SensorReading[]
+  alertRules              AlertRule[]
+
+  @@index([assetId])
+  @@index([sensorType])
+}
+
+model SensorReading {
+  id                      String      @id @default(cuid())
+  sensorId                String
+  value                   Float
+  timestamp               DateTime    @default(now())
+  ingestionTimestamp      DateTime    @default(now())
+
+  // Relations
+  sensor                  Sensor      @relation(fields: [sensorId], references: [id], onDelete: Cascade)
+
+  @@index([sensorId])
+  @@index([timestamp])
+  @@index([ingestionTimestamp])
+}
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+
+enum AlertSeverity {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+}
+
+enum AlertStatus {
+  ACTIVE
+  ACKNOWLEDGED
+  RESOLVED
+}
+
+model AlertRule {
+  id                      String      @id @default(cuid())
+  name                    String      @db.VarChar(255)
+  description             String?     @db.Text
+  sensorId                String?
+  assetId                 String?
+  siteId                  String?
+  condition               String      @db.Text // JSON: { "type": "threshold", "threshold": 100, "operator": ">" }
+  severity                AlertSeverity
+  enabled                 Boolean     @default(true)
+  createdBy               String
+  createdAt               DateTime    @default(now())
+  updatedAt               DateTime    @updatedAt
+
+  // Relations
+  sensor                  Sensor?     @relation(fields: [sensorId], references: [id], onDelete: SetNull)
+  asset                   Asset?      @relation(fields: [assetId], references: [id], onDelete: SetNull)
+  site                    Site?       @relation(fields: [siteId], references: [id], onDelete: SetNull)
+  creator                 User        @relation(fields: [createdBy], references: [id])
+  events                  AlertEvent[]
+
+  @@index([sensorId])
+  @@index([assetId])
+  @@index([siteId])
+  @@index([enabled])
+  @@index([createdBy])
+}
+
+model AlertEvent {
+  id                      String      @id @default(cuid())
+  ruleId                  String
+  message                 String      @db.Text
+  severity                AlertSeverity
+  status                  AlertStatus @default(ACTIVE)
+  detectedAt              DateTime    @default(now())
+  acknowledgedAt          DateTime?
+  acknowledgedBy          String?
+  resolvedAt              DateTime?
+  resolvedBy              String?
+  createdAt               DateTime    @default(now())
+
+  // Relations
+  rule                    AlertRule   @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+
+  @@index([ruleId])
+  @@index([status])
+  @@index([severity])
+  @@index([detectedAt])
+}
+
+// ============================================================================
+// AUDIT LOGGING (Tamper-aware)
+// ============================================================================
+
+enum AuditEventType {
+  // Auth events
+  AUTH_LOGIN_SUCCESS
+  AUTH_LOGIN_FAILURE
+  AUTH_LOGOUT
+  AUTH_REFRESH_TOKEN_ISSUED
+  AUTH_REFRESH_TOKEN_REUSED
+  AUTH_TOKEN_REVOKED
+  
+  // User/Permission events
+  USER_CREATED
+  USER_UPDATED
+  USER_DELETED
+  USER_ROLE_CHANGED
+  USER_MFA_ENABLED
+  USER_MFA_DISABLED
+  
+  // Data events
+  SITE_CREATED
+  SITE_UPDATED
+  SITE_DELETED
+  ASSET_CREATED
+  ASSET_UPDATED
+  ASSET_DELETED
+  SENSOR_CREATED
+  SENSOR_UPDATED
+  SENSOR_DELETED
+  READING_INGESTED
+  
+  // Alert events
+  ALERT_RULE_CREATED
+  ALERT_RULE_UPDATED
+  ALERT_RULE_DELETED
+  ALERT_EVENT_DETECTED
+  ALERT_EVENT_ACKNOWLEDGED
+  ALERT_EVENT_RESOLVED
+  
+  // Validation events
+  VALIDATION_FAILED
+  INGESTION_AUTH_FAILED
+  
+  // Security events
+  PRIVILEGE_ESCALATION_ATTEMPTED
+  SUSPICIOUS_ACTIVITY_DETECTED
+  RATE_LIMIT_EXCEEDED
+}
+
+model AuditLog {
+  id                      String      @id @default(cuid())
+  eventType               AuditEventType
+  userId                  String?
+  resourceType            String?     @db.VarChar(100)  // e.g., "User", "Site", "Sensor"
+  resourceId              String?     @db.VarChar(255)
+  action                  String?     @db.VarChar(100)  // e.g., "CREATE", "UPDATE", "DELETE"
+  changes                 String?     @db.Text          // JSON: { before: {}, after: {} }
+  ipAddress               String?     @db.VarChar(45)
+  userAgent               String?     @db.Text
+  severity                String      @db.VarChar(50)   // "INFO", "WARNING", "ERROR"
+  message                 String      @db.Text
+  correlationId           String?     @db.VarChar(255)
+  createdAt               DateTime    @default(now())
+
+  user                    User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([eventType])
+  @@index([userId])
+  @@index([resourceType])
+  @@index([createdAt])
+  @@index([correlationId])
+  @@index([severity])
+}
